@@ -173,6 +173,8 @@ Readability.prototype = {
       /^(ad(vertising|vertisement)?|pub(licité)?|werb(ung)?|广告|Реклама|Anuncio)$/iu,
     loadingWords:
       /^((loading|正在加载|Загрузка|chargement|cargando)(…|\.\.\.)?)$/iu,
+    asideRelevantIndicators: /\b(author|byline|bio|about|related|summary|excerpt|highlight|quote|sidebar|info|note|tip|callout|context|background)\b/i,
+    asideIrrelevantIndicators: /\b(nav|navigation|menu|sidebar|widget|ad|advertisement|promo|social|share|comment|footer|header|banner|popup|modal|overlay)\b/i,
   },
 
   UNLIKELY_ROLES: [
@@ -272,6 +274,9 @@ Readability.prototype = {
     quot: '"',
     apos: "'",
   },
+
+  // Irrelevant aside roles
+  ASIDE_IRRELEVANT_ROLES: ['navigation', 'banner', 'search', 'advertisement', 'complementary'],
 
   /**
    * Run any post-process modifications to article content as necessary.
@@ -806,7 +811,8 @@ Readability.prototype = {
     this._clean(articleContent, "embed");
     this._clean(articleContent, "footer");
     this._clean(articleContent, "link");
-    this._clean(articleContent, "aside");
+    // this._clean(articleContent, "aside");
+    this._processAsides(articleContent);
 
     // Clean out elements with little content that have "share" in their id/class combinations from final top candidates,
     // which means we don't remove the top candidates even they have "share".
@@ -2714,6 +2720,304 @@ Readability.prototype = {
           node.className.includes &&
           node.className.includes("fallback-image")))
     );
+  },
+
+    /**
+   * _isAsideRelevant - Determines if an aside element is relevant to the main article content
+   * 
+   * @param aside - The aside element to evaluate
+   * @param articleContent - The main article content element for comparison
+   * @return boolean - true if aside is relevant, false otherwise
+   */
+  _isAsideRelevant(aside, articleContent) {
+    if (!aside || aside.tagName !== "ASIDE") {
+      return false;
+    }
+
+    // Skip if aside is not visible
+    if (!this._isProbablyVisible(aside)) {
+      return false;
+    }
+
+    var score = 0;
+    var asideText = aside.textContent.trim();
+    var asideLength = asideText.length;
+
+    // Short asides are less likely to be relevant
+    if (asideLength < 50) {
+      return false;
+    }
+
+    // Very long asides might be navigation or unrelated content
+    if (asideLength > 2000) {
+      score -= 15;
+    }
+
+    // Check class names and IDs for relevance indicators
+    var matchString = (aside.className + " " + aside.id).toLowerCase();
+  
+    // Positive indicators
+    if (this.REGEXPS.asideRelevantIndicators.test(matchString)) {
+      score += 20;
+    }
+
+    // Negative indicators (navigation, ads, etc.)
+    if (this.REGEXPS.asideIrrelevantIndicators.test(matchString)) {
+      score -= 25;
+    }
+
+    // Check for common irrelevant roles
+    var role = aside.getAttribute("role");
+    if (role && this.ASIDE_IRRELEVANT_ROLES.includes(role)) {
+      score -= 20;
+    }
+
+    // Content similarity scoring
+    if (articleContent) {
+      var contentSimilarity = this._calculateContentSimilarity(aside, articleContent);
+      score += contentSimilarity * 15; // Scale similarity score
+    }
+
+    // Check for contextual indicators
+    score += this._scoreAsideContext(aside);
+
+    // Check content quality
+    score += this._scoreAsideContentQuality(aside);
+
+    // Position-based scoring
+    score += this._scoreAsidePosition(aside, articleContent);
+
+    this.log("Aside relevance score: " + score + " for element with class: " + matchString);
+
+    return score >= 10; // Threshold for relevance
+  },
+
+  /**
+   * _calculateContentSimilarity - Calculate semantic similarity between aside and article
+   */
+  _calculateContentSimilarity(aside, articleContent) {
+    if (!articleContent) return 0;
+
+    var asideText = aside.textContent.toLowerCase();
+    var articleText = articleContent.textContent.toLowerCase();
+  
+    // Extract key terms (simple approach - could be enhanced with NLP)
+    var asideWords = this._extractKeywords(asideText);
+    var articleWords = this._extractKeywords(articleText);
+  
+    if (asideWords.length === 0 || articleWords.length === 0) {
+      return 0;
+    }
+
+    var commonWords = asideWords.filter(word => articleWords.includes(word));
+    var similarity = commonWords.length / Math.max(asideWords.length, articleWords.length);
+  
+    return Math.min(similarity, 1.0);
+  },
+
+  /**
+   * _extractKeywords - Extract meaningful keywords from text
+   */
+  _extractKeywords(text) {
+    // Remove common stop words and extract meaningful terms
+    var stopWords = new Set(['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'should', 'could', 'can', 'may', 'might', 'must', 'this', 'that', 'these', 'those']);
+  
+    return text
+      .replace(/[^\w\s]/g, ' ')
+      .split(/\s+/)
+      .filter(word => word.length > 3 && !stopWords.has(word))
+      .slice(0, 20); // Limit to top 20 keywords
+  },
+
+  /**
+   * _scoreAsideContext - Score based on contextual clues
+   */
+  _scoreAsideContext(aside) {
+    var score = 0;
+  
+    // Check if aside contains author information
+    if (this._containsAuthorInfo(aside)) {
+      score += 10;
+    }
+
+    // Check for publication metadata
+    if (this._containsPublicationInfo(aside)) {
+      score += 8;
+    }
+
+    // Check for related articles or "see also" content
+    if (this._containsRelatedContent(aside)) {
+      score += 12;
+    }
+
+    // Check for social sharing or engagement elements
+    if (this._containsSocialElements(aside)) {
+      score += 5;
+    }
+
+    // Penalty for advertising indicators
+    if (this._containsAdvertising(aside)) {
+      score -= 20;
+    }
+
+    return score;
+  },
+
+  /**
+   * _scoreAsideContentQuality - Score the quality of aside content
+   */
+  _scoreAsideContentQuality(aside) {
+    var score = 0;
+    var text = aside.textContent.trim();
+  
+    // Check text-to-link ratio
+    var linkDensity = this._getLinkDensity(text);
+    if (linkDensity > 0.5) {
+      score -= 10; // Too many links suggests navigation/spam
+    } else if (linkDensity > 0.1 && linkDensity <= 0.3) {
+      score += 5; // Moderate linking can be good
+    }
+
+    // Check for structured content (lists, paragraphs)
+    var paragraphs = aside.getElementsByTagName('p').length;
+    var lists = aside.getElementsByTagName('ul').length + aside.getElementsByTagName('ol').length;
+  
+    if (paragraphs > 0 || lists > 0) {
+      score += 8;
+    }
+
+    // Check for images with alt text (indicates quality content)
+    var images = aside.getElementsByTagName('img');
+    var imagesWithAlt = Array.from(images).filter(img => img.getAttribute('alt')).length;
+    if (imagesWithAlt > 0) {
+      score += 6;
+    }
+
+    return score;
+  },
+
+  /**
+   * _scoreAsidePosition - Score based on aside position relative to article
+   */
+  _scoreAsidePosition(aside, articleContent) {
+    if (!articleContent) return 0;
+  
+    var score = 0;
+  
+    // Check if aside is within or adjacent to article content
+    if (articleContent.contains(aside) || this._isAdjacentToElement(aside, articleContent)) {
+      score += 10;
+    }
+
+    // Check if aside appears before, within, or after main content
+    var position = this._getRelativePosition(aside, articleContent);
+    switch (position) {
+      case 'within':
+        score += 15; // Most likely to be relevant
+        break;
+      case 'adjacent':
+        score += 10;
+        break;
+      case 'nearby':
+        score += 5;
+        break;
+      case 'distant':
+        score -= 5;
+        break;
+    }
+
+    return score;
+  },
+
+  /**
+   * Helper methods for content analysis
+   */
+  _containsAuthorInfo(aside) {
+    var text = aside.textContent.toLowerCase();
+    var authorIndicators = /\b(author|written by|by:|writer|journalist|reporter|about the author)\b/i;
+    return authorIndicators.test(text) || aside.querySelector('[itemprop*="author"]');
+  },
+
+  _containsPublicationInfo(aside) {
+    var text = aside.textContent.toLowerCase();
+    var pubIndicators = /\b(published|updated|edited|date|time|ago|yesterday|today)\b/i;
+    return pubIndicators.test(text) || aside.querySelector('time, [datetime]');
+  },
+
+  _containsRelatedContent(aside) {
+    var text = aside.textContent.toLowerCase();
+    var relatedIndicators = /\b(related|see also|more from|similar|recommended|you might like|continue reading)\b/i;
+    return relatedIndicators.test(text);
+  },
+
+  _containsSocialElements(aside) {
+    var socialIndicators = aside.querySelector('[class*="social"], [class*="share"], [class*="tweet"], [class*="facebook"]');
+    return !!socialIndicators;
+  },
+
+  _containsAdvertising(aside) {
+    var adIndicators = aside.querySelector('[class*="ad"], [class*="advertisement"], [id*="ad"]');
+    var text = aside.textContent.toLowerCase();
+    var adText = /\b(advertisement|sponsored|promoted|ad)\b/i;
+    return !!adIndicators || adText.test(text);
+  },
+
+  _isAdjacentToElement(element, target) {
+    var elementRect = element.getBoundingClientRect();
+    var targetRect = target.getBoundingClientRect();
+    var threshold = 100; // pixels
+  
+    return Math.abs(elementRect.top - targetRect.bottom) < threshold ||
+           Math.abs(elementRect.bottom - targetRect.top) < threshold ||
+           Math.abs(elementRect.left - targetRect.right) < threshold ||
+           Math.abs(elementRect.right - targetRect.left) < threshold;
+  },
+
+  _getRelativePosition(aside, articleContent) {
+    if (articleContent.contains(aside)) {
+      return 'within';
+    }
+  
+    if (this._isAdjacentToElement(aside, articleContent)) {
+      return 'adjacent';
+    }
+  
+    // Check if elements share a common parent at a reasonable level
+    var commonAncestor = this._findCommonAncestor(aside, articleContent);
+    if (commonAncestor && this._getElementDepth(commonAncestor) >= 3) {
+      return 'nearby';
+    }
+  
+    return 'distant';
+  },
+
+  _findCommonAncestor(element1, element2) {
+    var ancestors1 = [];
+    var current = element1;
+    while (current) {
+      ancestors1.push(current);
+      current = current.parentNode;
+    }
+  
+    current = element2;
+    while (current) {
+      if (ancestors1.includes(current)) {
+        return current;
+      }
+      current = current.parentNode;
+    }
+  
+    return null;
+  },
+
+  _getElementDepth(element) {
+    var depth = 0;
+    var current = element;
+    while (current && current !== document) {
+      depth++;
+      current = current.parentNode;
+    }
+    return depth;
   },
 
   /**
